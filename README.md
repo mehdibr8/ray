@@ -1,1 +1,1 @@
-https://raw.githubusercontent.com/USERNAME/udp2raw-manager/main/udp2raw_setup.sh
+bash <(curl -s https://raw.githubusercontent.com/mehdibr8/ray/main/udp2raw_setup.sh)
