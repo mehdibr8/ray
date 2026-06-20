@@ -12,6 +12,8 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 BINARY_PATH=$(realpath ./udp2raw_amd64 2>/dev/null || echo "/root/udp2raw_amd64")
+SERVICE_DIR="/etc/systemd/system"
+SERVICE_PREFIX="udp2raw-"
 
 # ===================================
 #           Main Menu
@@ -30,7 +32,7 @@ main_menu() {
     echo ""
 
     case $MAIN_CHOICE in
-        1) select_tunnel_install ;;
+        1) install_tunnel ;;
         2) select_tunnel_edit ;;
         3) select_tunnel_uninstall ;;
         *)
@@ -47,121 +49,23 @@ main_menu() {
 list_tunnels() {
     echo -e "${CYAN}Installed Tunnels:${NC}"
     local found=0
-    for i in $(seq 1 10); do
-        if [ -f "/etc/systemd/system/udp2raw-tunnel${i}.service" ]; then
-            STATUS=$(systemctl is-active udp2raw-tunnel${i} 2>/dev/null)
-            if [ "$STATUS" == "active" ]; then
-                STATUS_COLOR="${GREEN}● Active${NC}"
-            else
-                STATUS_COLOR="${RED}● Inactive${NC}"
-            fi
-            DESC=$(grep 'Description=' /etc/systemd/system/udp2raw-tunnel${i}.service | cut -d'-' -f3-)
-            echo -e "  ${YELLOW}Tunnel ${i}${NC} -${DESC} | $STATUS_COLOR"
-            found=1
+    for FILE in $SERVICE_DIR/${SERVICE_PREFIX}*.service; do
+        [ -f "$FILE" ] || continue
+        NAME=$(basename $FILE .service | sed "s/${SERVICE_PREFIX}//")
+        STATUS=$(systemctl is-active ${SERVICE_PREFIX}${NAME} 2>/dev/null)
+        if [ "$STATUS" == "active" ]; then
+            STATUS_COLOR="${GREEN}● Active${NC}"
+        else
+            STATUS_COLOR="${RED}● Inactive${NC}"
         fi
+        DESC=$(grep 'Description=' $FILE | sed 's/Description=udp2raw - //')
+        echo -e "  ${YELLOW}[$NAME]${NC} $DESC | $STATUS_COLOR"
+        found=1
     done
     if [ $found -eq 0 ]; then
         echo -e "  ${RED}No tunnels installed.${NC}"
     fi
     echo ""
-}
-
-# ===================================
-#     Select Tunnel Number (Install)
-# ===================================
-select_tunnel_install() {
-    clear
-    echo -e "${CYAN}--- Select Tunnel Number to Install ---${NC}"
-    echo ""
-    list_tunnels
-    echo -e "${YELLOW}Choose tunnel slot (1 to 10):${NC}"
-    for i in $(seq 1 10); do
-        if [ -f "/etc/systemd/system/udp2raw-tunnel${i}.service" ]; then
-            echo -e "  ${RED}Tunnel ${i}${NC} - Installed"
-        else
-            echo -e "  ${GREEN}Tunnel ${i}${NC} - Empty"
-        fi
-    done
-    echo ""
-    read -p "Tunnel number: " TUNNEL_NUM
-
-    if ! [[ "$TUNNEL_NUM" =~ ^[1-9]$|^10$ ]]; then
-        echo -e "${RED}Invalid number! Must be between 1 and 10.${NC}"
-        sleep 2
-        main_menu
-        return
-    fi
-
-    install_tunnel $TUNNEL_NUM
-}
-
-# ===================================
-#     Select Tunnel Number (Edit)
-# ===================================
-select_tunnel_edit() {
-    clear
-    echo -e "${CYAN}--- Select Tunnel to Edit ---${NC}"
-    echo ""
-    list_tunnels
-
-    local found=0
-    for i in $(seq 1 10); do
-        [ -f "/etc/systemd/system/udp2raw-tunnel${i}.service" ] && found=1
-    done
-
-    if [ $found -eq 0 ]; then
-        echo -e "${RED}No tunnels available to edit!${NC}"
-        sleep 2
-        main_menu
-        return
-    fi
-
-    read -p "Tunnel number to edit: " TUNNEL_NUM
-
-    if ! [ -f "/etc/systemd/system/udp2raw-tunnel${TUNNEL_NUM}.service" ]; then
-        echo -e "${RED}Tunnel ${TUNNEL_NUM} is not installed!${NC}"
-        sleep 2
-        main_menu
-        return
-    fi
-
-    edit_tunnel $TUNNEL_NUM
-}
-
-# ===================================
-#     Select Tunnel Number (Remove)
-# ===================================
-select_tunnel_uninstall() {
-    clear
-    echo -e "${CYAN}--- Select Tunnel to Remove ---${NC}"
-    echo ""
-    list_tunnels
-
-    local found=0
-    for i in $(seq 1 10); do
-        [ -f "/etc/systemd/system/udp2raw-tunnel${i}.service" ] && found=1
-    done
-
-    if [ $found -eq 0 ]; then
-        echo -e "${RED}No tunnels available to remove!${NC}"
-        sleep 2
-        main_menu
-        return
-    fi
-
-    echo -e "  ${RED}0)${NC} Remove ALL tunnels"
-    echo ""
-    read -p "Tunnel number to remove (or 0 for all): " TUNNEL_NUM
-
-    if [ "$TUNNEL_NUM" == "0" ]; then
-        uninstall_all_tunnels
-    elif ! [ -f "/etc/systemd/system/udp2raw-tunnel${TUNNEL_NUM}.service" ]; then
-        echo -e "${RED}Tunnel ${TUNNEL_NUM} is not installed!${NC}"
-        sleep 2
-        main_menu
-    else
-        uninstall_tunnel $TUNNEL_NUM
-    fi
 }
 
 # ===================================
@@ -189,14 +93,14 @@ select_protocol() {
 #       Create systemd Service
 # ===================================
 create_service() {
-    local TUNNEL_NUM="$1"
+    local NAME="$1"
     local EXEC_CMD="$2"
     local DESC="$3"
-    local SERVICE_FILE="/etc/systemd/system/udp2raw-tunnel${TUNNEL_NUM}.service"
+    local SERVICE_FILE="$SERVICE_DIR/${SERVICE_PREFIX}${NAME}.service"
 
     cat > $SERVICE_FILE << EOF
 [Unit]
-Description=udp2raw - Tunnel ${TUNNEL_NUM} - ${DESC}
+Description=udp2raw - ${DESC}
 After=network.target
 
 [Service]
@@ -210,26 +114,45 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable udp2raw-tunnel${TUNNEL_NUM}.service
-    systemctl restart udp2raw-tunnel${TUNNEL_NUM}.service
+    systemctl enable ${SERVICE_PREFIX}${NAME}.service
+    systemctl restart ${SERVICE_PREFIX}${NAME}.service
 
     echo ""
-    echo -e "${GREEN}[OK] Tunnel ${TUNNEL_NUM} started successfully!${NC}"
+    echo -e "${GREEN}[OK] Tunnel '$NAME' started successfully!${NC}"
     echo ""
     echo -e "${CYAN}Useful commands:${NC}"
-    echo "  Status  : systemctl status udp2raw-tunnel${TUNNEL_NUM}"
-    echo "  Logs    : journalctl -u udp2raw-tunnel${TUNNEL_NUM} -f"
-    echo "  Stop    : systemctl stop udp2raw-tunnel${TUNNEL_NUM}"
-    echo "  Restart : systemctl restart udp2raw-tunnel${TUNNEL_NUM}"
+    echo "  Status  : systemctl status ${SERVICE_PREFIX}${NAME}"
+    echo "  Logs    : journalctl -u ${SERVICE_PREFIX}${NAME} -f"
+    echo "  Stop    : systemctl stop ${SERVICE_PREFIX}${NAME}"
+    echo "  Restart : systemctl restart ${SERVICE_PREFIX}${NAME}"
 }
 
 # ===================================
 #        1) Install Tunnel
 # ===================================
 install_tunnel() {
-    local TUNNEL_NUM="$1"
     echo ""
-    echo -e "${CYAN}--- Install Tunnel ${TUNNEL_NUM} ---${NC}"
+    echo -e "${CYAN}--- Install New Tunnel ---${NC}"
+    echo ""
+
+    read -p "Enter a name for this tunnel (e.g. iran1, tehran, vps2): " TUNNEL_NAME
+
+    if [ -z "$TUNNEL_NAME" ]; then
+        echo -e "${RED}Name cannot be empty!${NC}"
+        sleep 1
+        main_menu
+        return
+    fi
+
+    TUNNEL_NAME=$(echo "$TUNNEL_NAME" | tr ' ' '-' | tr -cd '[:alnum:]-_')
+
+    if [ -f "$SERVICE_DIR/${SERVICE_PREFIX}${TUNNEL_NAME}.service" ]; then
+        echo -e "${RED}A tunnel with name '$TUNNEL_NAME' already exists!${NC}"
+        sleep 2
+        main_menu
+        return
+    fi
+
     echo ""
     echo -e "${YELLOW}Select server type:${NC}"
     echo "  1) Foreign Server (Server mode)"
@@ -247,7 +170,7 @@ install_tunnel() {
         select_protocol
 
         EXEC_CMD="${BINARY_PATH} -s -l 0.0.0.0:${LISTEN_PORT} -r 127.0.0.1:1010 -k \"${PASSWORD}\" --raw-mode ${PROTOCOL} --seq-mode 1 --disable-color --fix-gro"
-        create_service "$TUNNEL_NUM" "$EXEC_CMD" "Server port ${LISTEN_PORT}"
+        create_service "$TUNNEL_NAME" "$EXEC_CMD" "${TUNNEL_NAME} | Server port ${LISTEN_PORT}"
 
     elif [ "$SERVER_TYPE" == "2" ]; then
         echo -e "${GREEN}--- Iran Server Settings ---${NC}"
@@ -260,7 +183,7 @@ install_tunnel() {
         select_protocol
 
         EXEC_CMD="${BINARY_PATH} -c -l 0.0.0.0:${LOCAL_PORT} -r ${REMOTE_IP}:${REMOTE_PORT} -k \"${PASSWORD}\" --raw-mode ${PROTOCOL} --disable-color --fix-gro"
-        create_service "$TUNNEL_NUM" "$EXEC_CMD" "Client ${REMOTE_IP}:${REMOTE_PORT}"
+        create_service "$TUNNEL_NAME" "$EXEC_CMD" "${TUNNEL_NAME} | Client ${REMOTE_IP}:${REMOTE_PORT}"
 
     else
         echo -e "${RED}Invalid choice!${NC}"
@@ -269,14 +192,47 @@ install_tunnel() {
 }
 
 # ===================================
+#     Select Tunnel to Edit
+# ===================================
+select_tunnel_edit() {
+    clear
+    echo -e "${CYAN}--- Select Tunnel to Edit ---${NC}"
+    echo ""
+    list_tunnels
+
+    local found=0
+    for FILE in $SERVICE_DIR/${SERVICE_PREFIX}*.service; do
+        [ -f "$FILE" ] && found=1
+    done
+
+    if [ $found -eq 0 ]; then
+        echo -e "${RED}No tunnels available to edit!${NC}"
+        sleep 2
+        main_menu
+        return
+    fi
+
+    read -p "Enter tunnel name to edit: " TUNNEL_NAME
+
+    if ! [ -f "$SERVICE_DIR/${SERVICE_PREFIX}${TUNNEL_NAME}.service" ]; then
+        echo -e "${RED}Tunnel '$TUNNEL_NAME' not found!${NC}"
+        sleep 2
+        main_menu
+        return
+    fi
+
+    edit_tunnel "$TUNNEL_NAME"
+}
+
+# ===================================
 #        2) Edit Tunnel
 # ===================================
 edit_tunnel() {
-    local TUNNEL_NUM="$1"
-    local SERVICE_FILE="/etc/systemd/system/udp2raw-tunnel${TUNNEL_NUM}.service"
+    local NAME="$1"
+    local SERVICE_FILE="$SERVICE_DIR/${SERVICE_PREFIX}${NAME}.service"
 
     echo ""
-    echo -e "${CYAN}--- Edit Tunnel ${TUNNEL_NUM} ---${NC}"
+    echo -e "${CYAN}--- Edit Tunnel: $NAME ---${NC}"
     echo ""
 
     CURRENT_CMD=$(grep "ExecStart=" $SERVICE_FILE | sed 's/ExecStart=//')
@@ -329,7 +285,7 @@ edit_tunnel() {
         esac
 
         EXEC_CMD="${BINARY_PATH} -s -l 0.0.0.0:${LISTEN_PORT} -r 127.0.0.1:1010 -k \"${PASSWORD}\" --raw-mode ${PROTOCOL} --seq-mode 1 --disable-color --fix-gro"
-        create_service "$TUNNEL_NUM" "$EXEC_CMD" "Server port ${LISTEN_PORT}"
+        create_service "$NAME" "$EXEC_CMD" "${NAME} | Server port ${LISTEN_PORT}"
 
     else
         CUR_LOCAL_PORT=$(echo "$CURRENT_CMD" | grep -oP '(?<=-l 0.0.0.0:)\d+')
@@ -386,7 +342,43 @@ edit_tunnel() {
         esac
 
         EXEC_CMD="${BINARY_PATH} -c -l 0.0.0.0:${LOCAL_PORT} -r ${REMOTE_IP}:${REMOTE_PORT} -k \"${PASSWORD}\" --raw-mode ${PROTOCOL} --disable-color --fix-gro"
-        create_service "$TUNNEL_NUM" "$EXEC_CMD" "Client ${REMOTE_IP}:${REMOTE_PORT}"
+        create_service "$NAME" "$EXEC_CMD" "${NAME} | Client ${REMOTE_IP}:${REMOTE_PORT}"
+    fi
+}
+
+# ===================================
+#     Select Tunnel to Uninstall
+# ===================================
+select_tunnel_uninstall() {
+    clear
+    echo -e "${CYAN}--- Select Tunnel to Remove ---${NC}"
+    echo ""
+    list_tunnels
+
+    local found=0
+    for FILE in $SERVICE_DIR/${SERVICE_PREFIX}*.service; do
+        [ -f "$FILE" ] && found=1
+    done
+
+    if [ $found -eq 0 ]; then
+        echo -e "${RED}No tunnels available to remove!${NC}"
+        sleep 2
+        main_menu
+        return
+    fi
+
+    echo -e "  ${RED}all${NC} - Remove ALL tunnels"
+    echo ""
+    read -p "Enter tunnel name to remove (or 'all'): " TUNNEL_NAME
+
+    if [ "$TUNNEL_NAME" == "all" ]; then
+        uninstall_all_tunnels
+    elif ! [ -f "$SERVICE_DIR/${SERVICE_PREFIX}${TUNNEL_NAME}.service" ]; then
+        echo -e "${RED}Tunnel '$TUNNEL_NAME' not found!${NC}"
+        sleep 2
+        main_menu
+    else
+        uninstall_tunnel "$TUNNEL_NAME"
     fi
 }
 
@@ -394,11 +386,11 @@ edit_tunnel() {
 #       3) Uninstall One Tunnel
 # ===================================
 uninstall_tunnel() {
-    local TUNNEL_NUM="$1"
-    local SERVICE_FILE="/etc/systemd/system/udp2raw-tunnel${TUNNEL_NUM}.service"
+    local NAME="$1"
+    local SERVICE_FILE="$SERVICE_DIR/${SERVICE_PREFIX}${NAME}.service"
 
     echo ""
-    read -p "Are you sure you want to remove Tunnel ${TUNNEL_NUM}? (y/n): " CONFIRM
+    read -p "Are you sure you want to remove tunnel '$NAME'? (y/n): " CONFIRM
     if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
         echo -e "${YELLOW}Cancelled.${NC}"
         sleep 1
@@ -406,13 +398,13 @@ uninstall_tunnel() {
         return
     fi
 
-    systemctl stop udp2raw-tunnel${TUNNEL_NUM}.service
-    systemctl disable udp2raw-tunnel${TUNNEL_NUM}.service
+    systemctl stop ${SERVICE_PREFIX}${NAME}.service
+    systemctl disable ${SERVICE_PREFIX}${NAME}.service
     rm -f $SERVICE_FILE
     systemctl daemon-reload
 
     echo ""
-    echo -e "${GREEN}[OK] Tunnel ${TUNNEL_NUM} removed successfully!${NC}"
+    echo -e "${GREEN}[OK] Tunnel '$NAME' removed successfully!${NC}"
 }
 
 # ===================================
@@ -428,13 +420,13 @@ uninstall_all_tunnels() {
         return
     fi
 
-    for i in $(seq 1 10); do
-        if [ -f "/etc/systemd/system/udp2raw-tunnel${i}.service" ]; then
-            systemctl stop udp2raw-tunnel${i}.service
-            systemctl disable udp2raw-tunnel${i}.service
-            rm -f /etc/systemd/system/udp2raw-tunnel${i}.service
-            echo -e "${GREEN}[OK] Tunnel ${i} removed${NC}"
-        fi
+    for FILE in $SERVICE_DIR/${SERVICE_PREFIX}*.service; do
+        [ -f "$FILE" ] || continue
+        NAME=$(basename $FILE .service | sed "s/${SERVICE_PREFIX}//")
+        systemctl stop ${SERVICE_PREFIX}${NAME}.service
+        systemctl disable ${SERVICE_PREFIX}${NAME}.service
+        rm -f $FILE
+        echo -e "${GREEN}[OK] Tunnel '$NAME' removed${NC}"
     done
 
     systemctl daemon-reload
