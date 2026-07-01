@@ -1,20 +1,33 @@
 #!/bin/bash
 # ping_monitor.sh
-# Single script: on startup asks whether you are running the "Iran" side or the "Abroad" side
-# Iran side: only needs ping (report is sent with pure bash, no curl)
-# Abroad side: needs nc (to listen) and curl (to send to Telegram)
+#
+# Supports multiple independent instances on the same machine — e.g. several
+# "abroad" listeners with different ports/bot tokens/chat IDs, each serving a
+# different Iran-side server. Every instance is identified by a name you choose.
+#
+# Usage:
+#   ./ping_monitor.sh              -> interactive: asks for an instance name first,
+#                                      then (if that instance has no saved config)
+#                                      asks whether it's the Iran or Abroad side.
+#   ./ping_monitor.sh <instance>   -> non-interactive: loads the saved config for
+#                                      that instance directly (used by systemd).
 
 # ================= CONFIG =================
-
-# File where answers are saved after the first interactive run,
-# so that systemd (or any restart) can run without asking again.
-CONFIG_FILE="/etc/ping_monitor.conf"
-
 INTERVAL=60      # time between each report (seconds)
 PING_COUNT=10    # number of pings per IP
 PING_TIMEOUT=2   # timeout per ping (seconds)
-
 # ============================================
+
+INSTANCE_NAME="$1"
+
+if [ -z "$INSTANCE_NAME" ]; then
+    read -p "Enter a name for this instance (e.g. server1, iran_main): " INSTANCE_NAME
+    while [ -z "$INSTANCE_NAME" ] || [[ "$INSTANCE_NAME" =~ [^a-zA-Z0-9_-] ]]; do
+        read -p "Only letters, numbers, - and _ are allowed, and it can't be empty: " INSTANCE_NAME
+    done
+fi
+
+CONFIG_FILE="/etc/ping_monitor_${INSTANCE_NAME}.conf"
 
 
 # ======================================================================
@@ -28,20 +41,20 @@ install_service() {
     fi
 
     local INSTALL_PATH="/usr/local/bin/ping_monitor.sh"
+    local SERVICE_NAME="ping_monitor_${INSTANCE_NAME}"
 
-    # Copy this script itself to the system path
     cp "$(readlink -f "$0")" "$INSTALL_PATH"
     chmod +x "$INSTALL_PATH"
 
-    cat > /etc/systemd/system/ping_monitor.service << 'UNIT_EOF'
+    cat > "/etc/systemd/system/${SERVICE_NAME}.service" << UNIT_EOF
 [Unit]
-Description=Ping Monitor (Iran/Abroad)
+Description=Ping Monitor - instance: ${INSTANCE_NAME}
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ping_monitor.sh
+ExecStart=${INSTALL_PATH} ${INSTANCE_NAME}
 Restart=always
 RestartSec=5
 User=root
@@ -51,17 +64,20 @@ WantedBy=multi-user.target
 UNIT_EOF
 
     systemctl daemon-reload
-    systemctl enable ping_monitor >/dev/null 2>&1
-    systemctl restart ping_monitor
+    systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1
+    systemctl restart "${SERVICE_NAME}"
 
-    echo "Installed as a systemd service. It will now auto-start on every reboot."
-    echo "Check status with: systemctl status ping_monitor"
-    echo "View logs with:    journalctl -u ping_monitor -f"
+    echo "Installed as a systemd service named '${SERVICE_NAME}'. It will auto-start on every reboot."
+    echo "Check status with: systemctl status ${SERVICE_NAME}"
+    echo "View logs with:    journalctl -u ${SERVICE_NAME} -f"
+    echo
+    echo "To add another independent instance later, just run this script again"
+    echo "with a different instance name."
 }
 
 
 # ======================================================================
-# Iran side functions
+# Iran side
 # ======================================================================
 
 run_iran() {
@@ -71,12 +87,10 @@ run_iran() {
     SRV_PATH="/report"
 
     if [ -f "$CONFIG_FILE" ] && grep -q "^MODE=iran$" "$CONFIG_FILE"; then
-        # ---- Loading saved config, no questions asked ----
         source "$CONFIG_FILE"
         read -ra IPS <<< "$SAVED_IPS"
-        echo "[IRAN] Loaded saved config from $CONFIG_FILE"
+        echo "[IRAN:${INSTANCE_NAME}] Loaded saved config from $CONFIG_FILE"
     else
-        # ---- First-time interactive setup ----
         read -p "Enter the abroad server IP: " SRV_HOST
         while [ -z "$SRV_HOST" ]; do
             read -p "Server IP cannot be empty: " SRV_HOST
@@ -100,7 +114,6 @@ run_iran() {
             IPS+=("$ip")
         done
 
-        # ---- Save config for future automatic restarts ----
         {
             echo "MODE=iran"
             echo "SRV_HOST=\"$SRV_HOST\""
@@ -152,7 +165,7 @@ run_iran() {
         exec 3<&- 3>&-
     }
 
-    echo "[IRAN] Starting monitoring. Sending reports to: $SERVER_URL"
+    echo "[IRAN:${INSTANCE_NAME}] Starting monitoring. Sending reports to: $SERVER_URL"
     echo "IPs: ${IPS[*]}"
     echo
 
@@ -177,18 +190,16 @@ run_iran() {
 
 
 # ======================================================================
-# Abroad side functions
+# Abroad side
 # ======================================================================
 
 run_kharej() {
     local PORT BOT_TOKEN CHAT_ID
 
     if [ -f "$CONFIG_FILE" ] && grep -q "^MODE=kharej$" "$CONFIG_FILE"; then
-        # ---- Loading saved config, no questions asked ----
         source "$CONFIG_FILE"
-        echo "[ABROAD] Loaded saved config from $CONFIG_FILE"
+        echo "[ABROAD:${INSTANCE_NAME}] Loaded saved config from $CONFIG_FILE"
     else
-        # ---- First-time interactive setup ----
         read -p "Enter your Telegram bot token: " BOT_TOKEN
         while [ -z "$BOT_TOKEN" ]; do
             read -p "Bot token cannot be empty: " BOT_TOKEN
@@ -204,7 +215,6 @@ run_kharej() {
             read -p "Please enter a valid port number (1-65535): " PORT
         done
 
-        # ---- Save config for future automatic restarts ----
         {
             echo "MODE=kharej"
             echo "BOT_TOKEN=\"$BOT_TOKEN\""
@@ -235,7 +245,7 @@ run_kharej() {
         fi
     }
 
-    echo "[ABROAD] Server listening on port $PORT ..."
+    echo "[ABROAD:${INSTANCE_NAME}] Server listening on port $PORT ..."
 
     while true; do
         local REQUEST BODY
@@ -243,7 +253,7 @@ run_kharej() {
         BODY=$(printf '%s\n' "$REQUEST" | awk 'blank{print} /^\r?$/{blank=1}')
 
         if [ -n "$BODY" ]; then
-            local MSG="📡 Ping Report:"
+            local MSG="📡 Ping Report [${INSTANCE_NAME}]:"
             while IFS='|' read -r ip avg loss; do
                 [ -z "$ip" ] && continue
                 MSG="${MSG}
@@ -258,7 +268,7 @@ ${ip} → Avg: ${avg}, Loss: ${loss}%"
 
 
 # ======================================================================
-# Selection menu (skipped automatically if a saved config already exists)
+# Dispatch
 # ======================================================================
 
 if [ -f "$CONFIG_FILE" ]; then
@@ -275,7 +285,8 @@ if [ -f "$CONFIG_FILE" ]; then
     esac
 fi
 
-echo "Which side do you want to run?"
+echo "No saved config found for instance '${INSTANCE_NAME}'."
+echo "Which side is this instance?"
 echo "  1) Iran    (pings targets and sends reports)"
 echo "  2) Abroad  (receives reports and relays them to Telegram)"
 read -p "Enter your choice (1 or 2): " CHOICE
