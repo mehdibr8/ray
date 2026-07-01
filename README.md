@@ -22,5 +22,11 @@ curl -s https://raw.githubusercontent.com/mehdibr8/ray/main/udp2raw_setup.sh | s
 
 
 
+## ping_monitor
+
+## Install & Run
+```bash
+curl -s https://raw.githubusercontent.com/mehdibr8/ray/main/ping_monitor.sh | sed 's/\r//' > ping_monitor.sh && chmod +x ping_monitor.sh && ./ping_monitor.sh
+```
 
 
